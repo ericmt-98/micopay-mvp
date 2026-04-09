@@ -1,64 +1,184 @@
-# 🍄 Micopay: Emerald Horizon
+# 🍄 Micopay Protocol
 
-**Micopay** es un protocolo de intercambio P2P descentralizado que conecta el mundo del efectivo con el ecosistema de **Stellar & Soroban**. Nuestra misión es democratizar el acceso a las finanzas digitales permitiendo que cualquier persona retire o deposite fondos a través de una red confiable de agentes locales.
+**x402 microservice infrastructure for AI agents on Stellar**
 
-![Home Screen](file:///C:/Users/eric/.gemini/antigravity/brain/eccb3bf5-8e77-4c92-8e00-dc1b58078d91/home_screen_full_1774183739022.png)
+> Stellar Hacks: Agents — DoraHacks 2026
 
-> [!NOTE]
-> **Presentación del Proyecto**: [Empowering Everyone through Digital Money](https://gamma.app/docs/Empowering-everyone-through-digital-money-51bfqke37x9sjst?mode=doc)
+---
 
-## 🌟 Visión del Proyecto
-En mercados emergentes, la "última milla" de las criptomonedas es el efectivo. Micopay elimina la dependencia de bancos tradicionales mediante el uso de **Contratos Escrow (HTLC)** autogestionados, garantizando que el usuario siempre tenga el control de sus fondos.
+## What is Micopay?
 
-## 🛠️ Stack Tecnológico
-- **Blockchain**: Stellar Network & Soroban Smart Contracts (Rust).
-- **Frontend**: React 19 + Vite + Tailwind CSS v4 (Diseño Premium "Emerald Horizon").
-- **Backend (Live)**: Fastify (Node.js) en [Render](https://micopay-api.onrender.com).
-- **Base de Datos**: PostgreSQL para persistencia de reputación y estados.
+Micopay Protocol is a network of x402 microservices on Stellar that any AI agent can **discover, pay per-request, and compose**. No API keys. No signup. Payment IS authentication.
 
-## 🏗️ Arquitectura del Sistema
-```mermaid
-graph TD
-    User((Usuario)) -->|Interactúa| Frontend[Frontend React]
-    Frontend -->|API Requests| Backend[Backend Fastify]
-    Backend -->|Postgres| DB[(Database)]
-    Backend -->|RPC Soroban| Escrow[Escrow Contract]
-    Escrow -->|Bloquea/Libera| Stellar[Red Stellar]
-```
+The core primitive is an **atomic swap HTLC** (Soroban/Rust) coordinated by an AI agent: Claude understands intent and plans, a deterministic executor handles funds. The LLM never touches money.
 
-## 🚀 Guía de Showcase (Local Demo)
+### Tracks covered
 
-Para mostrar el potencial de Micopay en este hackatón, configuramos un entorno que permite probar los flujos completos de **Retiro** y **Depósito** en menos de 2 minutos.
+| Track | What we built |
+|-------|---------------|
+| Paid agent services / APIs | Every endpoint is pay-per-request via x402 |
+| Agent-to-agent payments | Swap coordinator agent pays for services |
+| Rating, reputation, and trust | On-chain reputation (4 tiers, NFT soulbound) |
+| Agent marketplaces / discovery | SKILL.md + `/api/v1/services` endpoint |
+| DeFi integrations | Atomic swaps cross-chain via HTLCs |
 
-### 1. Iniciar App (Modo Rápido)
-Si quieres probar la versión conectada a la API real, solo necesitas correr el frontend:
+---
+
+## Quick Start
+
 ```bash
-cd micopay/frontend
+# 1. Clone and install
+git clone https://github.com/ericmt-98/micopay-mvp
+cd micopay-mvp
 npm install
-# Asegúrate de configurar VITE_API_URL=https://micopay-api.onrender.com en tu .env o Vercel
-npm run dev
+
+# 2. Set environment variables
+cp .env.example .env
+# Add ANTHROPIC_API_KEY at minimum
+
+# 3. Start API
+cd apps/api && npm run dev
+
+# 4. Start dashboard
+cd apps/web && npm run dev
+
+# 5. Run the demo
+bash scripts/demo.sh
 ```
 
-## 🔒 Seguridad: Smart Escrow (HTLC) & QR
+---
 
-La confianza en Micopay no depende de los intermediarios, sino de la criptografía. Utilizamos un sistema de **Hash Time-Locked Contracts (HTLC)** implementado en **Soroban (Stellar Smart Contracts)**.
+## Services (x402)
 
-### ¿Cómo funciona el Escrow?
-1.  **`lock(secret_hash)`**: Cuando se inicia un trade, el Vendedor bloquea los fondos en el contrato. El backend genera un **Secreto Aleatorio** y guarda su **Hash** on-chain.
-2.  **`release(secret)`**: Para liberar los fondos, el Comprador debe presentar el **Secreto original**. El contrato verifica que `sha256(secreto) == hash_guardado` y transfiere los fondos.
-3.  **`refund()`**: Si el intercambio no sucede tras el tiempo pactado, el Vendedor recupera sus fondos de forma segura.
-
-### El Rol del Código QR
-El QR en Micopay **ES el Secreto (Preimage)**. El usuario es el único que posee la "llave" para liberar el dinero del contrato inteligente una vez que recibe el efectivo físico.
-
-![QR Concept](file:///C:/Users/eric/.gemini/antigravity/brain/eccb3bf5-8e77-4c92-8e00-dc1b58078d91/qr_screen_cashout_1774183983905.png)
+| Service | Endpoint | Price |
+|---------|----------|-------|
+| Service Discovery | `GET /api/v1/services` | **free** |
+| SKILL.md | `GET /skill.md` | **free** |
+| Fund Stats | `GET /api/v1/fund/stats` | **free** |
+| Swap Search | `GET /api/v1/swaps/search` | $0.001 |
+| Reputation | `GET /api/v1/reputation/:address` | $0.0005 |
+| Swap Plan (Claude) | `POST /api/v1/swaps/plan` | $0.01 |
+| Swap Execute | `POST /api/v1/swaps/execute` | $0.05 |
+| Swap Status | `GET /api/v1/swaps/:id/status` | $0.0001 |
+| **Fund Micopay** | `POST /api/v1/fund` | **$0.10** |
 
 ---
 
-### Documentación Técnica
--   **Contrato Soroban**: [lib.rs](file:///C:/Users/eric/Desktop/HACKATON/micopay/contracts/escrow/src/lib.rs)
--   **Arquitectura Core**: [micopay_backend_v1.3(1).md](file:///C:/Users/eric/Desktop/HACKATON/micopay_backend_v1.3(1).md)
--   **Demo Visual**: [Walkthrough de Usuario](file:///C:/Users/eric/.gemini/antigravity/brain/eccb3bf5-8e77-4c92-8e00-dc1b58078d91/walkthrough.md)
+## Architecture
+
+```
+┌─────────────────────────────────────────────────┐
+│                  AI Agent / User                 │
+└────────────────────────┬────────────────────────┘
+                         │ natural language intent
+                         ▼
+┌─────────────────────────────────────────────────┐
+│         Intent Parser (Claude API)               │
+│  • Understands intent                            │
+│  • Calls tools: search_swaps, get_reputation     │
+│  • Produces SwapPlan JSON                        │
+│  • NEVER touches funds                           │
+└────────────────────────┬────────────────────────┘
+                         │ SwapPlan
+                         ▼
+┌─────────────────────────────────────────────────┐
+│         Swap Executor (TypeScript, no LLM)       │
+│  • Follows plan exactly                          │
+│  • Lock on chain A → monitor chain B             │
+│  • Release (reveals secret) → counterparty claims│
+│  • Refund on timeout                             │
+└──────────┬──────────────────────┬───────────────┘
+           │                      │
+           ▼                      ▼
+┌──────────────────┐  ┌──────────────────────────┐
+│ AtomicSwapHTLC   │  │ AtomicSwapHTLC            │
+│ (Soroban chain A)│  │ (chain B — or mock)       │
+│                  │  │                           │
+│ lock()           │  │ lock()                    │
+│ release() ←secret│  │ release() ← secret public │
+│ refund()         │  │ refund()                  │
+└──────────────────┘  └──────────────────────────┘
+```
+
+### Key design principles
+
+1. **Payment IS authentication** — x402 replaces API keys
+2. **LLM plans, code executes** — Claude never touches funds
+3. **Two contracts, one trait** — `HashedTimeLock` shared between `AtomicSwapHTLC` and `MicopayEscrow`
+4. **Cross-chain without bridges** — atomicity from cryptography, not custodians
+5. **The project funds itself** — Fund Micopay proves x402 works in 10 seconds
 
 ---
-*Desarrollado con ❤️ para el Stellar Hackatón 2024.*
+
+## Repository Structure
+
+```
+micopay-protocol/
+├── contracts/
+│   ├── htlc-core/          # HashedTimeLock trait (Rust)
+│   ├── atomic-swap/        # Clean HTLC for cross-chain swaps
+│   └── micopay-escrow/     # P2P escrow with disputes & reputation
+├── packages/
+│   ├── types/              # Shared TypeScript types
+│   └── sdk/                # AtomicSwapClient + Stellar helpers
+├── apps/
+│   ├── api/                # Fastify API with x402 middleware
+│   ├── agent/              # Claude intent parser + SwapExecutor
+│   └── web/                # React dashboard
+├── skill/
+│   └── SKILL.md            # OpenClaw agent skill definition
+└── scripts/
+    ├── demo.sh             # Full demo flow
+    └── deploy-contracts.sh # Deploy to testnet
+```
+
+---
+
+## Contracts (Soroban/Rust)
+
+9 unit tests, all passing:
+
+```bash
+cd contracts && cargo test
+# atomic-swap: 4 tests ✓
+# micopay-escrow: 5 tests ✓
+```
+
+The `HashedTimeLock` trait defines the shared interface. Both contracts implement `lock()`, `release()`, and `refund()`. The same TypeScript SDK client works with both.
+
+---
+
+## x402 Flow
+
+```
+Agent → GET /api/v1/swaps/search
+      ← 402 { challenge: { amount_usdc: "0.001", pay_to: "G...", memo: "micopay:swap_search" } }
+
+Agent builds Stellar USDC payment tx, signs it
+
+Agent → GET /api/v1/swaps/search
+        X-Payment: <signed_xdr>
+      ← 200 { counterparties: [...] }
+```
+
+---
+
+## Fund Micopay
+
+The meta-demo: an agent funds the project using the same x402 infrastructure it's demonstrating.
+
+```bash
+curl -X POST https://api.micopay.xyz/api/v1/fund \
+  -H "X-Payment: <signed_stellar_xdr>" \
+  -d '{"message": "x402 works!"}'
+```
+
+Response includes `stellar_expert_url` for on-chain verification.
+
+---
+
+## Team
+
+Built for **Stellar Hacks: Agents** (DoraHacks 2026) by Eric + Stichui.
+
+Built with Claude Sonnet 4.6, Soroban, Stellar SDK, Fastify, React, Turborepo.
