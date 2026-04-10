@@ -1,6 +1,11 @@
 import type { FastifyInstance } from "fastify";
 import Anthropic from "@anthropic-ai/sdk";
 import { requirePayment } from "../middleware/x402.js";
+import { planStore, swapStore } from "../lib/swapStore.js";
+import { executeAtomicSwapBackground } from "../lib/soroban.js";
+
+const CONTRACT_A = process.env.ATOMIC_SWAP_CONTRACT_A ?? "CCDOUXIXSFXT2HTJAJGFNUJN6CKCYX2M6AL2BHHPEF6ISNHP2BGLS4KX";
+const CONTRACT_B = process.env.ATOMIC_SWAP_CONTRACT_B ?? "CBLCGG44QQILWEIVBXDSZSLH7NI7SGJQKXQ7WTKP3W3YSXOBTGMZKSNN";
 
 const SYSTEM_PROMPT = `
 Eres el agente de atomic swaps de Micopay Protocol.
@@ -238,6 +243,22 @@ export async function agentRoutes(fastify: FastifyInstance): Promise<void> {
 
       try {
         const plan = await planSwap(body.intent, body.user_address ?? "GUNKOWN", API_BASE);
+
+        // Store plan so execute can retrieve it by plan_id
+        planStore.set(plan.id as string, {
+          id:                   plan.id as string,
+          sell_asset:           (plan.amounts as any).sell_asset,
+          sell_amount:          (plan.amounts as any).sell_amount,
+          buy_asset:            (plan.amounts as any).buy_asset,
+          buy_amount:           (plan.amounts as any).buy_amount,
+          exchange_rate:        (plan.amounts as any).exchange_rate ?? "0",
+          initiator_ledgers:    (plan.timeouts as any).initiator_ledgers,
+          counterparty_ledgers: (plan.timeouts as any).counterparty_ledgers,
+          risk_level:           plan.risk_level as string,
+          estimated_time_seconds: plan.estimated_time_seconds as number,
+          created_at:           new Date().toISOString(),
+        });
+
         return reply.send({ plan, payer: request.payerAddress, agent: "claude-haiku-4-5" });
       } catch (err) {
         fastify.log.error(err);
@@ -254,18 +275,64 @@ export async function agentRoutes(fastify: FastifyInstance): Promise<void> {
     "/api/v1/swaps/execute",
     { preHandler: requirePayment({ amount: "0.05", service: "swap_execute" }) },
     async (request, reply) => {
-      const body = request.body as { plan_id: string; user_address: string };
+      const body = request.body as { plan_id: string; user_address?: string };
 
       if (!body?.plan_id) {
         return reply.status(400).send({ error: "plan_id is required" });
       }
 
+      const plan = planStore.get(body.plan_id);
+      if (!plan) {
+        return reply.status(404).send({ error: "plan_id not found — call /api/v1/swaps/plan first" });
+      }
+
+      const initiatorSecret    = process.env.PLATFORM_SECRET_KEY;
+      const counterpartySecret = process.env.DEMO_AGENT_SECRET_KEY;
+      if (!initiatorSecret || !counterpartySecret) {
+        return reply.status(503).send({ error: "Demo keypairs not configured" });
+      }
+
+      const swapId = `swap_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`;
+      const now    = new Date().toISOString();
+
+      // Register swap in store immediately
+      swapStore.set(swapId, {
+        swap_id:     swapId,
+        plan_id:     plan.id,
+        status:      "queued",
+        sell_asset:  plan.sell_asset,
+        sell_amount: plan.sell_amount,
+        buy_asset:   plan.buy_asset,
+        buy_amount:  plan.buy_amount,
+        txs:         {},
+        created_at:  now,
+        updated_at:  now,
+      });
+
+      // Run the 4 contract calls in background — do NOT await
+      executeAtomicSwapBackground(
+        swapId,
+        initiatorSecret,
+        counterpartySecret,
+        CONTRACT_A,
+        CONTRACT_B,
+        plan.sell_asset,
+        parseFloat(plan.sell_amount),
+        plan.buy_asset,
+        parseFloat(plan.buy_amount),
+        plan.initiator_ledgers,
+        plan.counterparty_ledgers,
+      ).catch((err) => fastify.log.error("Swap execution error:", err));
+
       return reply.status(202).send({
-        swap_id: `swap_${Date.now()}`,
-        plan_id: body.plan_id,
-        status: "executing",
-        message: "Swap initiated. Poll /api/v1/swaps/:id/status for updates.",
-        payer: request.payerAddress,
+        swap_id:    swapId,
+        plan_id:    plan.id,
+        status:     "queued",
+        sell:       `${plan.sell_amount} ${plan.sell_asset}`,
+        buy:        `${plan.buy_amount} ${plan.buy_asset}`,
+        payer:      request.payerAddress,
+        message:    "Swap queued. Poll GET /api/v1/swaps/:id/status for live progress.",
+        poll_url:   `/api/v1/swaps/${swapId}/status`,
       });
     }
   );

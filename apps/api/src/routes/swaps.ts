@@ -1,6 +1,9 @@
 import type { FastifyInstance } from "fastify";
 import { requirePayment } from "../middleware/x402.js";
 import type { CounterpartyInfo } from "@micopay/types";
+import { swapStore } from "../lib/swapStore.js";
+
+const EXPLORER = "https://stellar.expert/explorer/testnet/tx";
 
 const HORIZON_URL = "https://horizon-testnet.stellar.org";
 
@@ -160,11 +163,30 @@ export async function swapRoutes(fastify: FastifyInstance): Promise<void> {
     { preHandler: requirePayment({ amount: "0.0001", service: "swap_status" }) },
     async (request, reply) => {
       const { id } = request.params as { id: string };
+      const swap = swapStore.get(id);
+
+      if (!swap) {
+        return reply.status(404).send({ error: "Swap not found", swap_id: id });
+      }
+
+      // Attach stellar.expert links for any confirmed txs
+      const txLinks: Record<string, string> = {};
+      for (const [key, hash] of Object.entries(swap.txs)) {
+        if (hash) txLinks[key] = `${EXPLORER}/${hash}`;
+      }
+
       return reply.send({
-        swap_id: id,
-        status: "locked",
-        created_at: new Date().toISOString(),
-        updated_at: new Date().toISOString(),
+        swap_id:    swap.swap_id,
+        plan_id:    swap.plan_id,
+        status:     swap.status,
+        sell:       `${swap.sell_amount} ${swap.sell_asset}`,
+        buy:        `${swap.buy_amount} ${swap.buy_asset}`,
+        secret_hash: swap.secret_hash,
+        txs:        swap.txs,
+        tx_links:   txLinks,
+        error:      swap.error,
+        created_at: swap.created_at,
+        updated_at: swap.updated_at,
       });
     }
   );

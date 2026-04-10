@@ -1,7 +1,7 @@
-# 🍄 Micopay — Backend Spec v1.3
+# 🍄 Micopay — Backend Spec v1.4
 
-**Spec técnica del servidor, contratos Soroban, payment rails y arquitectura de datos**  
-Marzo 2026
+**Spec técnica del servidor, contratos Soroban, payment rails y arquitectura de datos**
+Abril 2026
 
 ---
 
@@ -9,6 +9,11 @@ Marzo 2026
 > Desarrollador(es) backend. Asume conocimiento de Node.js/TypeScript, PostgreSQL, y conceptos básicos de blockchain. No asume conocimiento de Stellar — todos los conceptos de Soroban están explicados.
 
 ---
+
+> **Changelog v1.3 → v1.4**
+> - **CORRECCIÓN ARQUITECTURA:** Blend Capital **no** hace yield automático sobre fondos bloqueados en escrow. La integración correcta es DeFi voluntario: el usuario elige desde la pantalla Explorar si quiere depositar activos idle en Blend (yield) o pedir un préstamo colateralizado. Sin composabilidad forzada con HTLC.
+> - **CORRECCIÓN FLUJO CETES:** El flujo primario para comprar CETES es un **swap directo en el DEX de Stellar** (XLM/USDC/MXNe → CETES token) — sin KYC, sin SPEI, sin intermediario. El flujo SPEI se mantiene como opción secundaria para usuarios que vienen desde fiat y no tienen cripto (sección 10.3 / Card "Conecta tu Banco").
+> - Secciones 18 y 19 reescritas completamente para reflejar la visión correcta del producto: DeFi accesible desde la pantalla Explorar, sin acoplamiento al escrow.
 
 > **Changelog v1.2 → v1.3**
 > - **CRITICAL:** Etherfuse es anchor nativo en Stellar (no requiere bridge Solana). Sección 19 reescrita completamente — CETES se emiten directamente en Stellar vía SPEI. Movido de v3 a v2.
@@ -156,9 +161,9 @@ App móvil (React Native)
          │     ├── ReputationRegistry
          │     └── MicopayNFT
          │
-         └── DeFi Layer (roadmap v2-v3)
-               ├── Blend Capital (yield on escrow)
-               └── Etherfuse (CETES stablebonds vía bridge Solana)
+         └── DeFi Layer — Explorar (roadmap v2)
+               ├── Blend Capital (préstamos colateralizados + yield voluntario)
+               └── Etherfuse (CETES — swap DEX directo + on-ramp SPEI opcional)
 ```
 
 ### 2.1 Principio de diseño: el servidor nunca firma
@@ -2513,59 +2518,74 @@ API_BASE_URL=https://api.micopay.mx
 
 ---
 
-## 18. Blend Capital — Yield on Escrow (v2)
+## 18. Blend Capital — DeFi Voluntario (v2)
 
 **Estado: planificado para v2. No incluido en v1.**
 
+> **⚠️ Corrección v1.4:** Blend Capital **no** se integra como yield automático sobre fondos bloqueados en escrow. Esa arquitectura era incorrecta: añade riesgo de composabilidad al HTLC, el yield en 30-120 min es negligible, y el usuario nunca consintió poner sus fondos en un protocolo DeFi durante un trade P2P. La integración correcta es **DeFi voluntario** — el usuario accede desde la pantalla **Explorar** y elige qué hacer con sus activos idle.
+
 ### 18.1 Concepto
 
-Los fondos bloqueados en el HTLC escrow (típicamente 30min-2h) pueden generar yield depositándolos en un lending pool de Blend Capital. Blend opera nativamente en Soroban, lo que permite composabilidad atómica — no hay bridge, no hay riesgo cross-chain.
+Blend Capital es un protocolo de lending nativo en Soroban. Micopay lo integra como una funcionalidad opcional en la pantalla **Explorar** — no tiene ningún acoplamiento con el flujo de escrow P2P. El usuario decide de forma explícita:
 
-### 18.2 Flujo técnico
+- **Préstamo colateralizado:** depositar XLM como colateral → recibir USDC o MXNe prestado sin vender sus activos
+- **Yield sobre activos idle:** depositar MXNe/USDC en un lending pool → ganar APY mientras no los usa
+
+El contrato EscrowFactory **no cambia** — sigue siendo el mismo HTLC simple. Blend es una capa separada completamente.
+
+### 18.2 Flujo A — Préstamo colateralizado ("Pide un préstamo hoy")
 
 ```
-1. Vendedor llama EscrowFactory.lock() con MXNe
-2. EscrowFactory deposita MXNe en Blend pool → recibe bTokens
-3. Escrow almacena bTokens (receipt tokens de Blend)
-4. Durante la espera, el MXNe en el pool genera yield
-
-5a. En release(): redimir bTokens → MXNe + yield acumulado
-    → Buyer recibe MXNe original
-    → Yield se reparte: 80% vendedor, 20% plataforma
-
-5b. En refund(): redimir bTokens → MXNe + yield → todo al vendedor
+Usuario tiene 1,000 XLM en su wallet Micopay
+    ↓
+Explorar → "Pide un préstamo hoy"
+    ↓
+App consulta Blend: "Con 1,000 XLM (~$20,000 MXN) puedes pedir hasta $15,000 MXN (LTV 75%)"
+    ↓
+Usuario ingresa monto → "Pedir $5,000 MXN"
+    ↓
+Backend construye 2 txs Soroban:
+  1. supply(XLM, 1000) → Blend pool · recibe bXLM tokens (colateral)
+  2. borrow(MXNe, 5000) → MXNe a la wallet del usuario
+    ↓
+Usuario firma con biometrics (una sola tx empaquetada)
+    ↓
+MXNe disponible · XLM bloqueado como colateral en Blend
+    ↓
+Para recuperar XLM: repagar MXNe + interés (~8% anual)
 ```
 
-### 18.3 Integración con el contrato EscrowFactory
+### 18.3 Flujo B — Yield sobre activos idle
 
-```rust
-// EscrowFactory v2 — funciones adicionales para Blend
-use blend_sdk::{Pool, Request};
-
-fn lock_with_yield(
-    env: Env,
-    seller: Address,
-    buyer: Address,
-    amount: i128,
-    platform_fee: i128,
-    secret_hash: BytesN<32>,
-    timeout_minutes: u32,
-    blend_pool: Address,          // dirección del Blend pool
-) -> BytesN<32> {
-    // 1. Transfer MXNe del seller al contrato
-    // 2. Depositar MXNe en Blend pool
-    // 3. Almacenar bToken amount en el trade struct
-    // 4. Retornar trade_id
-}
+```
+Usuario tiene 2,000 MXNe que no va a usar pronto
+    ↓
+Explorar → sección de ahorro con Blend
+    ↓
+App muestra: "Depositar 2,000 MXNe → ganar ~8% APY ($160 MXN/año)"
+    ↓
+Usuario confirma → Backend construye tx: supply(MXNe, 2000)
+    ↓
+Usuario firma → recibe bMXNe tokens (receipt del depósito)
+    ↓
+Home muestra bMXNe como activo con rendimiento acumulado en tiempo real
+    ↓
+Retirar: redimir bMXNe → MXNe + yield
 ```
 
 ### 18.4 Endpoints del backend (v2)
 
 ```
-POST   /savings/blend/deposit    → depositar MXNe idle en Blend pool
-POST   /savings/blend/withdraw   → retirar de Blend pool
-GET    /savings/blend/rate       → tasa actual del pool MXNe en Blend
+GET    /savings/blend/rates           → tasas actuales (APY de supply, costo de borrow) por asset
+GET    /loans/estimate                → cuánto puedo pedir dado mi balance de XLM/MXNe/USDC
+POST   /loans/borrow                  → construir txs de supply + borrow (XDR sin firmar)
+POST   /loans/repay                   → construir tx de repago (XDR sin firmar)
+POST   /savings/blend/deposit         → construir tx de supply para yield (XDR sin firmar)
+POST   /savings/blend/withdraw        → construir tx de redención de bTokens (XDR sin firmar)
+GET    /savings/blend/positions       → posiciones activas del usuario en Blend
 ```
+
+> El backend nunca firma — devuelve el XDR para que el cliente firme con biometrics. Principio de diseño: sección 2.1.
 
 ### 18.5 DB: tabla `savings_positions` (provider = 'blend')
 
@@ -2575,136 +2595,174 @@ Ver sección 3.12. Los campos relevantes para Blend:
 - `estimated_apy`: APY estimado al momento del depósito
 - `accrued_yield`: yield acumulado (actualizado por job periódico)
 
-### 18.6 Prerequisitos y riesgos
+### 18.6 Prerequisitos
 
 | Prerequisito | Estado |
 |---|---|
-| Blend pools activos para MXNe en mainnet | Por verificar |
-| Auditoría del flujo EscrowFactory → Blend | Pendiente |
-| Análisis de riesgo de composabilidad | Pendiente |
+| Blend pools activos para MXNe/USDC en mainnet | Por verificar con Blend Capital |
+| `@blend-capital/blend-sdk` instalado | Pendiente (v2) |
+| Consulta de LTV y APY desde el SDK | Pendiente |
 
-**Riesgo principal:** si Blend sufre un exploit, los fondos en escrow están en riesgo. Mitigación: implementar un flag para habilitar/deshabilitar yield-on-escrow por trade, y un circuit breaker que desactive automáticamente si se detecta actividad anómala en el pool.
-
-**Análisis económico:** el yield en 2h es probablemente negligible (~0.01% anualizado en un trade de 30min). El valor real está en los fondos idle que los usuarios mantienen en su wallet entre trades — esos sí pueden generar yield significativo vía los endpoints de savings.
+**Nota de diseño:** en el futuro, si el usuario quiere, puede opcionalmente activar "yield automático" sobre sus activos idle en la wallet (no durante el escrow). Esto requeriría que el usuario autorice explícitamente que sus fondos se depositen en Blend cuando no están en un trade activo. Es un feature opt-in consciente, nunca implícito.
 
 ---
 
-## 19. Etherfuse — CETES Stablebonds (v2)
+## 19. Etherfuse — CETES Tokenizados (v2)
 
-**Estado: planificado para v2. Integración técnicamente viable hoy — Etherfuse ya opera como anchor en Stellar.**
+**Estado: planificado para v2. Integración técnicamente viable hoy.**
 
-> **⚠️ Corrección v1.3:** Etherfuse ya es un **anchor nativo en la red Stellar**. Emite CETES tokens directamente en Stellar, acepta depósitos vía SPEI, y tiene flujos completos de on-ramp y off-ramp. **No requiere bridge a Solana, no requiere Wormhole ni Allbridge, no implica custodía intermedia por parte del backend.** La integración es comparable en complejidad a AlfredPay.
+> **⚠️ Corrección v1.4 (reescritura completa):** El flujo principal para invertir en CETES **no es SPEI**. Los CETES son assets nativos de Stellar emitidos por Etherfuse, listados en el DEX de Stellar. Un usuario que ya tiene XLM, USDC o MXNe en su wallet Micopay puede comprar CETES con un **path payment directo** — sin KYC adicional, sin transferencia bancaria, sin esperas. El flujo SPEI existe como opción secundaria únicamente para usuarios que vienen desde fiat y no tienen cripto (ver sección 10.3, Card "Conecta tu Banco").
 
 ### 19.1 Concepto
 
-Los usuarios de Micopay pueden invertir MXNe (o MXN directamente vía SPEI) en CETES tokenizados — bonos de deuda soberana mexicana con rendimiento real (~11% anual). Los CETES son assets Stellar Classic emitidos por Etherfuse como anchor. El usuario los mantiene en su wallet self-custodial.
+CETES tokenizados son bonos del gobierno mexicano emitidos como assets Stellar Classic por Etherfuse. Generan ~11% de rendimiento anual. El usuario los mantiene en su wallet self-custodial — Micopay nunca los custodia.
 
-### 19.2 Flujo de integración (nativo Stellar)
+Hay dos formas de adquirirlos:
+1. **Flujo primario (DEX swap):** el usuario ya tiene cripto → swap directo en el DEX de Stellar → CETES en segundos, sin KYC, sin banco
+2. **Flujo secundario (SPEI on-ramp):** el usuario viene desde fiat → transfiere MXN vía SPEI → Etherfuse entrega CETES → requiere KYC de Etherfuse
+
+### 19.2 Flujo primario — DEX Swap (sin KYC, sin SPEI)
+
+Este es el flujo para el usuario típico de Micopay que ya tiene activos en su wallet.
 
 ```
-Compra de CETES (on-ramp):
-1. Usuario selecciona "Ahorro en CETES" en la app
-2. Backend crea customer en Etherfuse (si no existe)
-3. KYC via iframe embebido (una sola vez)
-4. Backend solicita quote MXN→CETES
-5. Se generan instrucciones SPEI → usuario transfiere desde su banco
-6. Etherfuse entrega CETES tokens a la wallet Stellar del usuario
-7. Backend registra posición en savings_positions
-
-Venta de CETES (off-ramp):
-1. Usuario solicita retiro de CETES
-2. Backend solicita quote CETES→MXN
-3. Backend crea orden de off-ramp
-4. Polling hasta que Etherfuse devuelva el XDR de la burn transaction
-5. Cliente firma la tx de burn (biometrics)
-6. Etherfuse envía MXN al banco del usuario vía SPEI
+Usuario tiene XLM / USDC / MXNe en su wallet
+    ↓
+Explorar → "Haz crecer tus ahorros" (Card Etherfuse CETES)
+    ↓
+Ingresa monto: "Quiero invertir 500 XLM"
+    ↓
+App consulta Stellar DEX (Horizon order book):
+  "500 XLM → 198.4 CETES (~$19,840 MXN · rendimiento $2,271/año al 11.45%)"
+    ↓
+Usuario acepta · Backend construye pathPaymentStrictReceive:
+  send_asset: XLM
+  send_max: 505 XLM (slippage 1%)
+  dest_asset: CETES (issuer: Etherfuse)
+  dest_amount: 198.4
+    ↓
+Usuario firma con biometrics
+    ↓
+CETES en wallet · tx confirmada en ~5 segundos
+    ↓
+Home screen muestra CETES como activo con tasa y rendimiento acumulado
 ```
 
-> **Diferencia clave vs AlfredPay:** el off-ramp de Etherfuse requiere una **burn transaction** (el anchor genera el XDR y el usuario lo firma). AlfredPay recibe un pago directo de USDC. Esto es porque CETES es un asset emitido por Etherfuse que se destruye al redimir.
+Para vender (CETES → XLM/USDC/MXNe):
+```
+Explorar → posición CETES activa → "Vender"
+    ↓
+pathPaymentStrictReceive en sentido inverso: CETES → XLM
+    ↓
+Fondos disponibles en segundos · no requiere banco ni CLABE
+```
 
-### 19.3 Integración con la librería del Regional Starter Pack
+> **Nota:** vender CETES en el DEX implica encontrar contrapartes que quieran comprarlos. Si la liquidez del DEX es insuficiente, el off-ramp vía Etherfuse (burn + SPEI) es la alternativa.
+
+### 19.3 Flujo secundario — SPEI (solo para usuarios fiat sin cripto)
+
+Este flujo corresponde a la Card "Conecta tu Banco" en la pantalla Explorar (sección 10.3), no a la Card de CETES. Se usa cuando el usuario no tiene activos en su wallet y quiere entrar desde su banco.
+
+```
+Compra (MXN → CETES vía SPEI):
+1. Usuario selecciona "Conecta tu Banco"
+2. Backend crea customer en Etherfuse (KYC vía iframe — una sola vez)
+3. Solicita quote MXN → CETES
+4. Genera instrucciones SPEI (CLABE, referencia, monto)
+5. Usuario transfiere desde su banco (BBVA, Banamex, etc.)
+6. Etherfuse entrega CETES tokens a la wallet Stellar del usuario (~minutos)
+
+Venta (CETES → MXN vía SPEI — si DEX sin liquidez):
+1. Solicita quote CETES → MXN
+2. Crea orden de off-ramp en Etherfuse
+3. Polling hasta que Etherfuse genere el XDR de burn transaction
+4. Cliente firma el XDR con biometrics
+5. Etherfuse envía MXN al banco del usuario vía SPEI
+```
+
+### 19.4 Integración técnica — DEX swap (flujo primario)
 
 ```typescript
-import { EtherfuseAnchor } from './lib/anchors/etherfuse';
+import * as StellarSdk from '@stellar/stellar-sdk';
 
-const etherfuse = new EtherfuseAnchor({
-  apiUrl: process.env.ETHERFUSE_API_URL!,
-  apiKey: process.env.ETHERFUSE_API_KEY!,
-});
+const CETES_ASSET = new StellarSdk.Asset(
+  'CETES',
+  process.env.ETHERFUSE_ISSUER!  // issuer address de Etherfuse en mainnet
+);
 
-// Off-ramp: CETES → MXN (flujo específico de Etherfuse)
-async function initiateEtherfuseWithdraw(
-  userId: string,
-  cetesAmount: number,
-  bankClabe: string
-): Promise<{ status: string }> {
-  const user = await db.getUser(userId);
+// GET /savings/cetes/quote
+async function getCetesQuote(sellAsset: string, sellAmount: string) {
+  const horizon = new StellarSdk.Horizon.Server(process.env.HORIZON_URL!);
 
-  // 1. Quote
-  const quote = await etherfuse.getQuote({
-    from_asset: 'CETES',
-    to_currency: 'MXN',
-    amount: cetesAmount,
-  });
+  // Consultar order book CETES/XLM en el DEX
+  const orderBook = await horizon.orderbook(
+    sellAsset === 'XLM' ? StellarSdk.Asset.native() : new StellarSdk.Asset(sellAsset, process.env[`${sellAsset}_ISSUER`]!),
+    CETES_ASSET
+  ).call();
 
-  // 2. Crear orden de off-ramp
-  const order = await etherfuse.createOffRampOrder({
-    customer_id: user.etherfuse_customer_id,
-    quote_id: quote.id,
-    bank_clabe: bankClabe,
-  });
+  const bestAsk = parseFloat(orderBook.asks[0]?.price ?? '0');
+  const cetesAmount = bestAsk > 0 ? parseFloat(sellAmount) / bestAsk : 0;
+  const mxnValue = cetesAmount * 100; // 1 CETES = ~$100 MXN (valor nominal)
+  const annualYield = mxnValue * 0.1145;
 
-  // 3. Polling hasta que aparezca la burn tx
-  let burnXdr: string | null = null;
-  for (let i = 0; i < 30; i++) {
-    await sleep(2000);
-    const status = await etherfuse.getOrderStatus(order.id);
-    if (status.transaction_xdr) {
-      burnXdr = status.transaction_xdr;
-      break;
-    }
-  }
+  return { cetesAmount, mxnValue, annualYield, rate: bestAsk };
+}
 
-  if (!burnXdr) {
-    throw new Error('Timeout waiting for burn transaction from Etherfuse');
-  }
+// POST /savings/cetes/buy → devuelve XDR sin firmar
+async function buildCetesBuyTx(userAddress: string, sellAsset: string, sellAmount: string, cetesAmount: string) {
+  const horizon = new StellarSdk.Horizon.Server(process.env.HORIZON_URL!);
+  const account = await horizon.loadAccount(userAddress);
 
-  // 4. Devolver XDR al cliente para que firme
-  await db.execute(`
-    INSERT INTO payment_transactions
-    (user_id, type, send_asset, send_amount, anchor_tx_id, bank_clabe, status)
-    VALUES ($1, 'withdraw', 'CETES', $2, $3, $4, 'pending')
-  `, [userId, cetesAmount, order.id, bankClabe]);
+  const tx = new StellarSdk.TransactionBuilder(account, {
+    fee: StellarSdk.BASE_FEE,
+    networkPassphrase: StellarSdk.Networks.PUBLIC,
+  })
+    .addOperation(StellarSdk.Operation.pathPaymentStrictReceive({
+      sendAsset: sellAsset === 'XLM' ? StellarSdk.Asset.native() : new StellarSdk.Asset(sellAsset, process.env[`${sellAsset}_ISSUER`]!),
+      sendMax: (parseFloat(sellAmount) * 1.01).toFixed(7), // 1% slippage
+      destination: userAddress,                             // el mismo usuario
+      destAsset: CETES_ASSET,
+      destAmount: cetesAmount,
+      path: [],                                             // DEX encuentra la ruta
+    }))
+    .setTimeout(180)
+    .build();
 
-  // El cliente firma el burnXdr con biometrics y lo submite a Stellar
-  return { status: 'awaiting_signature', tx_xdr: burnXdr };
+  return tx.toXDR();
 }
 ```
 
-### 19.4 Endpoints del backend
+### 19.5 Endpoints del backend
 
 ```
-POST   /savings/cetes/deposit    → iniciar compra de CETES vía SPEI (on-ramp Etherfuse)
-POST   /savings/cetes/withdraw   → iniciar venta de CETES → MXN (off-ramp Etherfuse)
-GET    /savings/cetes/quote      → cotización actual CETES↔MXN
-GET    /savings/cetes/positions  → posiciones CETES activas del usuario
-GET    /savings/cetes/rates      → tasas CETES disponibles (plazos, rendimientos)
+GET    /savings/cetes/quote         → cotización DEX: X XLM/USDC/MXNe → Y CETES (+ rendimiento proyectado)
+GET    /savings/cetes/rates         → tasa CETES actual (Banxico API) y liquidez del DEX
+POST   /savings/cetes/buy           → construir pathPayment XLM/USDC/MXNe → CETES (XDR sin firmar)
+POST   /savings/cetes/sell          → construir pathPayment CETES → XLM/USDC/MXNe (XDR sin firmar)
+GET    /savings/cetes/positions     → saldo CETES del usuario + rendimiento acumulado estimado
+
+# Flujo SPEI (secundario — Card "Conecta tu Banco")
+POST   /payments/spei/cetes/deposit → iniciar on-ramp MXN → CETES vía Etherfuse anchor
+POST   /payments/spei/cetes/withdraw → iniciar off-ramp CETES → MXN vía burn tx
 ```
 
-### 19.5 DB: tabla `savings_positions` (provider = 'etherfuse')
+### 19.6 DB: tabla `savings_positions` (provider = 'etherfuse')
 
-Ver sección 3.12. Los campos relevantes:
-- `etherfuse_bond_id`: ID del bono en Etherfuse
-- `cetes_rate`: tasa del CETE al momento de la compra (e.g. 11.25%)
-- `maturity_date`: fecha de vencimiento del CETE
+Para el flujo DEX, el saldo CETES se lee directamente de la blockchain (no necesita DB). La tabla `savings_positions` aplica principalmente al flujo SPEI donde hay un order ID en Etherfuse que rastrear:
+- `etherfuse_bond_id`: ID de la orden en Etherfuse (solo flujo SPEI)
+- `cetes_rate`: tasa CETES al momento de la compra (de Banxico API)
+- `maturity_date`: fecha de vencimiento (solo aplica a bonos SPEI, no a tokens DEX)
 
-### 19.6 Por qué v2 y no v1
+Para el flujo DEX, el balance CETES se muestra en Home leyendo directamente el balance del asset en la wallet Stellar del usuario.
 
-La integración técnica es viable hoy, pero hay dos razones para diferirla:
-1. **KYC adicional:** Etherfuse requiere su propio KYC (independiente del de Micopay). Esto añade fricción al onboarding. En v1 el foco es P2P cash trades con la menor fricción posible.
-2. **Scope de MVP:** v1 se enfoca en el HTLC escrow + wallet básica. Los CETES son un feature de "ahorro" que retiene usuarios pero no es el hook de adquisición.
+### 19.7 Por qué v2 y no v1
 
-**Para v2:** la integración está lista — es copiar la librería del Regional Starter Pack, agregar los endpoints, y conectar la UI de savings.
+1. **Verificar liquidez del DEX:** necesitamos confirmar que hay suficiente liquidez en el order book CETES/XLM y CETES/USDC en mainnet para que el swap sea fluido.
+2. **Issuer address de Etherfuse:** confirmar el asset code y issuer en mainnet antes de hardcodear.
+3. **Trustline:** el usuario necesita agregar la trustline de CETES antes del primer swap — el backend construye esta tx como parte del onboarding de la feature.
+4. **Scope:** v1 se enfoca en el HTLC escrow + wallet básica. CETES es un feature de retención de usuarios.
+
+**Para v2:** confirmar issuer de Etherfuse, verificar liquidez DEX, agregar trustline en el flujo de onboarding de CETES, implementar los endpoints de quote y swap.
 
 ---
 
@@ -2726,8 +2784,8 @@ La integración técnica es viable hoy, pero hay dos razones para diferirla:
 | **Anchor** | Entidad que conecta Stellar con el sistema financiero tradicional. Emite y redime assets tokenizados (e.g. MXNe). Maneja KYC, compliance y settlement fiat. |
 | **Path payment** | Tipo de transacción Stellar que convierte automáticamente entre assets usando el DEX. El emisor envía en asset A, el receptor recibe en asset B, Stellar encuentra la mejor ruta. |
 | **Stellar DEX** | Order book descentralizado nativo de Stellar. Permite intercambiar cualquier par de assets sin intermediario. Los path payments lo usan automáticamente. |
-| **Stablebond** | Bono gubernamental tokenizado (e.g. CETES mexicanos tokenizados por Etherfuse). Emitidos como assets nativos en Stellar — no requieren bridge. Generan rendimiento real respaldado por deuda soberana. |
-| **bToken** | Receipt token de Blend Capital. Representa un depósito en un lending pool. Se redime por el principal + yield acumulado. |
+| **Stablebond** | Bono gubernamental tokenizado (e.g. CETES mexicanos tokenizados por Etherfuse). Emitidos como assets Stellar Classic nativos. El usuario los adquiere vía swap en el DEX de Stellar (flujo primario) o vía SPEI on-ramp (flujo secundario para usuarios fiat). |
+| **bToken** | Receipt token de Blend Capital. Representa un depósito voluntario en un lending pool. Se redime por el principal + yield acumulado. No tiene relación con fondos en escrow HTLC. |
 | **Self-custodial wallet** | Wallet donde la clave privada la controla exclusivamente el usuario en su dispositivo. El servidor no tiene acceso a ella. También llamada "non-custodial wallet". |
 | **Custodial wallet** | Wallet donde un tercero (empresa, exchange) controla la clave privada del usuario. Micopay NO usa este modelo — todas las wallets son self-custodial. |
 | **Trustline** | Autorización explícita en Stellar para que una cuenta pueda mantener un asset específico. Sin trustline, la cuenta no puede recibir el asset. |
@@ -2743,4 +2801,4 @@ La integración técnica es viable hoy, pero hay dos razones para diferirla:
 
 ---
 
-*Micopay Backend Spec v1.3 — Marzo 2026*
+*Micopay Backend Spec v1.4 — Abril 2026*

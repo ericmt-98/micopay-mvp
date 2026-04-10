@@ -1,5 +1,5 @@
 import type { FastifyRequest, FastifyReply, FastifyInstance } from "fastify";
-import { Networks, Transaction } from "@stellar/stellar-sdk";
+import { Networks, Transaction, Keypair } from "@stellar/stellar-sdk";
 
 /**
  * x402 Payment Required middleware for Fastify.
@@ -15,9 +15,15 @@ import { Networks, Transaction } from "@stellar/stellar-sdk";
  * - Verify the payment destination, amount, and asset
  */
 
-const PLATFORM_ADDRESS =
-  process.env.PLATFORM_STELLAR_ADDRESS ??
-  "GBZXN7PIRZGNMHGA7MUUUF4GWMTISGNQ5E72TFL6GDWPE6K4RCAVOALV";
+function getPlatformAddress(): string {
+  const secret = process.env.PLATFORM_SECRET_KEY;
+  if (secret) {
+    try { return Keypair.fromSecret(secret).publicKey(); } catch {}
+  }
+  return process.env.PLATFORM_STELLAR_ADDRESS ?? "GDKKW2WSMQWZ63PIZBKDDBAAOBG5FP3TUHRYQ4U5RBKTFNESL5K5BJJK";
+}
+
+const PLATFORM_ADDRESS = getPlatformAddress();
 
 const USDC_ASSET_CODE = "USDC";
 const STELLAR_NETWORK = process.env.STELLAR_NETWORK ?? "TESTNET";
